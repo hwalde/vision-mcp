@@ -136,6 +136,23 @@ def _get_ocr_reader():
     return _ocr_reader
 
 
+def _preimport_heavy_modules() -> None:
+    """Importiert easyocr und ultralytics im Main-Thread, bevor der Server läuft.
+
+    Die Tools reichen die Modellaufrufe über `_run_sync` an Worker-Threads weiter.
+    Findet dort der *erste* `import easyocr` statt, bleibt unter Windows der
+    DLL-Load von `scipy.linalg.blas` dauerhaft stehen (easyocr → scipy.ndimage →
+    scipy.special → scipy.linalg): Der Tool-Call antwortet nie, der Client läuft in
+    seinen Idle-Timeout. Im Main-Thread ist derselbe Import unauffällig.
+
+    Der Selbsttest lief nie hinein, weil er `_detect_text_sync` direkt aufruft —
+    also im Main-Thread. Nur die Importe werden vorgezogen; die Gewichte bleiben
+    lazy und kosten weiterhin erst beim ersten Aufruf Zeit.
+    """
+    import easyocr  # noqa: F401
+    from ultralytics import YOLO  # noqa: F401
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -715,4 +732,5 @@ def _selftest() -> int:
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
+    _preimport_heavy_modules()
     mcp.run()
