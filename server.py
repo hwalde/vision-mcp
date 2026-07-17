@@ -8,6 +8,7 @@ Sprache besser verarbeiten als verschachtelte Strukturen.
 
 import asyncio
 import os
+import sys
 import tempfile
 from typing import Optional, List, Dict, Any, Tuple
 from functools import partial
@@ -619,5 +620,66 @@ async def vision_analyze_layout(params: AnalyzeLayoutInput) -> str:
     return "\n".join(lines) + META_FOOTER
 
 
+def _selftest() -> int:
+    """Prüft Abhängigkeiten, lädt die Modelle vor und analysiert ein erzeugtes Testbild.
+
+    Gedacht als erster Schritt nach dem Auschecken: ein Befehl, der auf jedem
+    Betriebssystem sagt, ob der Server einsatzbereit ist — statt den Fehler erst
+    beim ersten Tool-Aufruf im Agenten zu sehen. Läuft bewusst ohne Netz-Zugriff,
+    sobald die Modelle einmal im Cache liegen.
+    """
+    import platform
+
+    print(f"Python {sys.version.split()[0]} auf {platform.system()} ({platform.machine()})")
+    if sys.version_info < (3, 10):
+        print("FEHLER: Python 3.10 oder neuer wird benötigt.")
+        return 1
+
+    print("\n[1/4] Abhängigkeiten prüfen ...")
+    missing = []
+    for mod, pkg in (("mcp", "mcp"), ("pydantic", "pydantic"), ("httpx", "httpx"),
+                     ("numpy", "numpy"), ("PIL", "Pillow"), ("ultralytics", "ultralytics"),
+                     ("easyocr", "easyocr")):
+        try:
+            __import__(mod)
+            print(f"      OK   {pkg}")
+        except ImportError:
+            print(f"      FEHLT {pkg}")
+            missing.append(pkg)
+    if missing:
+        print(f"\nFEHLER: Es fehlen: {', '.join(missing)}")
+        print("Behebung:  pip install -r requirements.txt")
+        return 1
+
+    print(f"\n[2/4] YOLO-Gewichte laden ({YOLO_MODEL_NAME}) ...")
+    print(f"      Ziel: {_resolve_yolo_weights()}")
+    print("      (Beim ersten Mal wird heruntergeladen — das braucht Internet.)")
+    _get_yolo_model()
+    print("      OK")
+
+    print(f"\n[3/4] OCR-Modelle laden (Sprachen: {', '.join(OCR_LANGUAGES)}) ...")
+    print("      (Beim ersten Mal ~100 MB Download.)")
+    _get_ocr_reader()
+    print("      OK")
+
+    print("\n[4/4] Testbild analysieren ...")
+    from PIL import ImageDraw
+    img = Image.new("RGB", (600, 300), "white")
+    ImageDraw.Draw(img).text((250, 140), "VISION MCP", fill="black")
+    texts = _detect_text_sync(img)
+    _detect_objects_sync(img, 0.25, None)
+    if not texts:
+        print("      WARNUNG: OCR hat im Testbild keinen Text gefunden.")
+        print("      Die Installation ist grundsätzlich in Ordnung, aber die Texterkennung")
+        print("      lieferte kein Ergebnis — bitte mit einem echten Bild gegenprüfen.")
+        return 1
+    print(f"      OK — erkannter Text: {', '.join(t['name'] for t in texts)}")
+
+    print("\nAlles bereit. Der Server kann als MCP-Server eingebunden werden.")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
     mcp.run()

@@ -1,29 +1,60 @@
 # Vision MCP Server
 
-MCP-Server (stdio, Python) für lokale Bild-Analyse: **Objekterkennung** (YOLOv8) und
-**OCR** (EasyOCR), plus Layout-Aussagen zu Abständen und Zentrierung. Läuft auf Windows, macOS
-und Linux — **vollständig lokal, ohne API-Key und ohne Cloud**.
+**Ein MCP-Server, der einem LLM Augen für Bilder gibt — vollständig lokal, ohne API-Key, ohne Cloud.**
 
-Die Berichte sind LLM-optimierter Markdown-Text statt JSON: „Text „Headline" liegt 276px oberhalb
-von person." statt verschachtelter Koordinaten.
+Objekterkennung (YOLOv8) und Texterkennung (EasyOCR), aufbereitet zu Aussagen, mit denen ein
+Sprachmodell tatsächlich arbeiten kann: Wo liegt was, wie groß ist es, ist es zentriert, wie weit
+ist es von etwas anderem entfernt?
 
-## Features
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-- **Objekte erkennen** — Klasse, Konfidenz, Position, Größe, Flächenanteil, Zentrierung
-- **Text erkennen (OCR)** — Deutsch + Englisch, Sprachen konfigurierbar
-- **Abstände messen** zwischen zwei benannten Elementen, inkl. Überlappung/Berührung
-- **Ausrichtung prüfen** eines einzelnen Elements
-- **Komplette Layout-Analyse** in einem Aufruf (Objekte + Texte + Beziehungen)
+---
 
-Bildquelle: lokaler Pfad oder `http(s)`-URL.
+## Warum Markdown statt JSON?
 
-## Schnellstart
+Die meisten Vision-Tools geben Koordinaten zurück und überlassen dem Modell das Rechnen. Dieser
+Server dreht das um und liefert fertige Sätze:
+
+```
+Text „Jetzt anmelden" liegt 276px unterhalb von person.
+person — Konfidenz: high (0.91)
+   Position: x=310, y=120 | Größe: 280×410 px | 24.3% des Bildes
+   Horizontal: zentriert (1.2% Abweichung)
+   Vertikal: off-center, 88px nach oben (14.7%)
+```
+
+Ein LLM verarbeitet „liegt 276px unterhalb von" zuverlässiger als vier verschachtelte Bounding-Box-
+Zahlen, aus denen es die Beziehung erst selbst ableiten müsste. Jeder Bericht trägt eine Fußnote
+mit Koordinatensystem- und Konfidenz-Legende, damit die Zahlen ohne Zusatzkontext richtig gedeutet
+werden.
+
+## Tools
+
+| Tool | Beantwortet die Frage |
+|---|---|
+| `vision_detect_objects` | Welche Objekte sind im Bild — wo, wie groß, zentriert? |
+| `vision_detect_text` | Welcher Text steht wo im Bild? (OCR) |
+| `vision_measure_distance` | Wie weit sind zwei Elemente voneinander entfernt? Überlappen sie? |
+| `vision_check_alignment` | Ist dieses eine Element zentriert — und wie stark daneben? |
+| `vision_analyze_layout` | Gesamtüberblick in einem Aufruf: Objekte + Texte + Beziehungen |
+
+Als Bildquelle wird ein lokaler Pfad (`~` wird aufgelöst) oder eine `http(s)`-URL akzeptiert.
+Elemente werden über ihren Namen angesprochen — eine YOLO-Klasse wie `person` oder ein Textinhalt
+wie `Jetzt anmelden`, auch als Teilstring.
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
+python3 server.py --selftest     # Windows: python server.py --selftest
 ```
 
-MCP-Eintrag (`~/.claude.json`):
+Der Selbsttest prüft die Abhängigkeiten, lädt die Modelle vor und analysiert ein Testbild. Sagt er
+„Alles bereit", ist der Server einsatzfähig.
+
+Dann in `~/.claude.json` eintragen:
 
 ```json
 {
@@ -37,27 +68,33 @@ MCP-Eintrag (`~/.claude.json`):
 }
 ```
 
-Beim ersten Start werden die Modell-Gewichte automatisch geladen (YOLO ~6 MB, EasyOCR ~100 MB).
+Beim ersten Start werden die Modelle automatisch geladen (YOLO ~6 MB, EasyOCR ~100 MB) — danach
+läuft alles offline. **Kein API-Key, kein Cloud-Konto:** Es verlässt kein Bild den Rechner, was den
+Server auch für vertrauliches Material brauchbar macht.
 
-## Tools
+## Grenzen — bitte vorher lesen
 
-| Tool | Zweck |
-|---|---|
-| `vision_detect_objects` | Objekte im Bild erkennen |
-| `vision_detect_text` | Text im Bild erkennen (OCR) |
-| `vision_measure_distance` | Abstand zwischen zwei Elementen messen |
-| `vision_check_alignment` | Zentrierung eines Elements prüfen |
-| `vision_analyze_layout` | Komplette Layout-Analyse |
+- **YOLOv8 erkennt nur die ~80 COCO-Klassen** (person, car, dog, laptop, bottle …), also
+  **keine UI-Elemente**: keine Buttons, Logos, Icons, keine Design-Shapes. Ein Creative auf „ist der
+  Button mittig?" prüft man über den **Text** des Buttons (OCR), nicht über Objekterkennung.
+- **OCR versagt** bei stark stilisierten Schriften, Handschrift und sehr kleinem oder
+  kontrastarmem Text; die Wortgruppierung entspricht nicht immer der menschlichen Erwartung.
+- **Läuft auf der CPU.** Der erste Aufruf ist langsam, weil die Modelle lazy geladen werden.
 
-## Grenzen
+## Konfiguration
 
-YOLOv8 erkennt nur die ~80 COCO-Klassen — **keine UI-Elemente** wie Buttons, Logos oder Icons.
-OCR kann bei stilisierten oder sehr kleinen Schriften versagen. Läuft auf der CPU.
+Alles optional — ohne jede Variable läuft der Server mit sinnvollen Defaults.
+
+| Variable | Bedeutung | Default |
+|---|---|---|
+| `VISION_MCP_YOLO_MODEL` | YOLO-Gewichte (`yolov8n/s/m/l/x.pt` oder absoluter Pfad) | `yolov8n.pt` |
+| `VISION_MCP_OCR_LANGS` | OCR-Sprachen, kommagetrennt | `de,en` |
+| `VISION_MCP_MODEL_DIR` | Cache-Verzeichnis der Gewichte | `~/.cache/vision-mcp` bzw. `%LOCALAPPDATA%\vision-mcp` |
 
 ## Dokumentation
 
-**Vollständige Setup-, Konfigurations- und Betriebsdoku: [CLAUDE.md](./CLAUDE.md).**
+Vollständige Setup-, Konfigurations- und Betriebsdoku: **[AGENTS.md](./AGENTS.md)**.
 
 ## Lizenz
 
-Proprietär
+[MIT](./LICENSE) © Herbert Walde
