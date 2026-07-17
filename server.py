@@ -14,6 +14,59 @@ from typing import Optional, List, Dict, Any, Tuple
 from functools import partial
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Selbsttest-Vorspann
+# ---------------------------------------------------------------------------
+# Python-Version und Abhängigkeiten werden geprüft, BEVOR die schweren Importe
+# laufen. Andernfalls stirbt genau der Aufruf, der die Diagnose liefern soll,
+# schon beim Import von httpx/numpy/PIL — der Nutzer sähe einen nackten
+# Traceback statt der Liste dessen, was ihm fehlt.
+
+_REQUIRED_PACKAGES = (
+    ("mcp", "mcp"),
+    ("pydantic", "pydantic"),
+    ("httpx", "httpx"),
+    ("numpy", "numpy"),
+    ("PIL", "Pillow"),
+    ("ultralytics", "ultralytics"),
+    ("easyocr", "easyocr"),
+)
+
+
+def _preflight() -> int:
+    """Prüft Python-Version und Verfügbarkeit aller Pakete, ohne sie zu importieren."""
+    import platform
+    import importlib.util
+
+    print(f"Python {sys.version.split()[0]} auf {platform.system()} ({platform.machine()})")
+    if sys.version_info < (3, 10):
+        print(f"\nFEHLER: Python 3.10 oder neuer wird benötigt (gefunden: {sys.version.split()[0]}).")
+        print("Behebung: Neueres Python installieren und den Selbsttest damit erneut starten.")
+        return 1
+
+    print("\n[1/4] Abhängigkeiten prüfen ...")
+    missing = []
+    for module_name, package_name in _REQUIRED_PACKAGES:
+        try:
+            found = importlib.util.find_spec(module_name) is not None
+        except (ImportError, ValueError):
+            found = False
+        print(f"      {'OK  ' if found else 'FEHLT'} {package_name}")
+        if not found:
+            missing.append(package_name)
+
+    if missing:
+        print(f"\nFEHLER: Es fehlen: {', '.join(missing)}")
+        print("Behebung:  pip install -r requirements.txt")
+        return 1
+    return 0
+
+
+if "--selftest" in sys.argv:
+    _preflight_result = _preflight()
+    if _preflight_result != 0:
+        sys.exit(_preflight_result)
+
 import httpx
 import numpy as np
 from PIL import Image
@@ -621,36 +674,16 @@ async def vision_analyze_layout(params: AnalyzeLayoutInput) -> str:
 
 
 def _selftest() -> int:
-    """Prüft Abhängigkeiten, lädt die Modelle vor und analysiert ein erzeugtes Testbild.
+    """Lädt die Modelle vor und analysiert ein erzeugtes Testbild.
 
     Gedacht als erster Schritt nach dem Auschecken: ein Befehl, der auf jedem
     Betriebssystem sagt, ob der Server einsatzbereit ist — statt den Fehler erst
     beim ersten Tool-Aufruf im Agenten zu sehen. Läuft bewusst ohne Netz-Zugriff,
     sobald die Modelle einmal im Cache liegen.
+
+    Python-Version und Abhängigkeiten hat bereits _preflight() geprüft, bevor die
+    Importe dieses Moduls liefen.
     """
-    import platform
-
-    print(f"Python {sys.version.split()[0]} auf {platform.system()} ({platform.machine()})")
-    if sys.version_info < (3, 10):
-        print("FEHLER: Python 3.10 oder neuer wird benötigt.")
-        return 1
-
-    print("\n[1/4] Abhängigkeiten prüfen ...")
-    missing = []
-    for mod, pkg in (("mcp", "mcp"), ("pydantic", "pydantic"), ("httpx", "httpx"),
-                     ("numpy", "numpy"), ("PIL", "Pillow"), ("ultralytics", "ultralytics"),
-                     ("easyocr", "easyocr")):
-        try:
-            __import__(mod)
-            print(f"      OK   {pkg}")
-        except ImportError:
-            print(f"      FEHLT {pkg}")
-            missing.append(pkg)
-    if missing:
-        print(f"\nFEHLER: Es fehlen: {', '.join(missing)}")
-        print("Behebung:  pip install -r requirements.txt")
-        return 1
-
     print(f"\n[2/4] YOLO-Gewichte laden ({YOLO_MODEL_NAME}) ...")
     print(f"      Ziel: {_resolve_yolo_weights()}")
     print("      (Beim ersten Mal wird heruntergeladen — das braucht Internet.)")

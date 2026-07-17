@@ -19,7 +19,7 @@ verschachtelte Koordinaten-Strukturen.
 | Baustein | Zweck |
 |---|---|
 | Python ≥ 3.10 | Laufzeit |
-| Pakete aus `requirements.txt` | u. a. `ultralytics` (YOLO), `easyocr`, `torch` |
+| Pakete aus `requirements.txt` | u. a. `ultralytics` (YOLO) und `easyocr` — beide ziehen `torch` transitiv mit |
 | YOLOv8-Gewichte (`yolov8n.pt`, ~6 MB) | werden beim ersten Start **automatisch geladen** |
 | EasyOCR-Sprachmodelle (~100 MB) | werden beim ersten OCR-Aufruf **automatisch geladen** |
 
