@@ -3,7 +3,7 @@
 > Diese Datei ist die **einzige Quelle** der Projekt-Doku. `CLAUDE.md` importiert sie per
 > `@AGENTS.md`, damit Claude Code sie automatisch mitlädt — nicht duplizieren, hier pflegen.
 
-MCP-Server (stdio, Python/FastMCP) für Bild-Analyse: **Objekterkennung** (YOLOv8) und
+MCP-Server (Python/FastMCP, stdio **oder** streamable-http — siehe „Transporte") für Bild-Analyse: **Objekterkennung** (YOLOv8) und
 **Texterkennung/OCR** (EasyOCR), plus abgeleitete Layout-Aussagen (Abstände, Zentrierung).
 Läuft auf **Windows, macOS und Linux**, komplett **lokal und offline** — es geht kein Bild an
 eine Cloud-API.
@@ -114,6 +114,79 @@ In `~/.claude.json` (bzw. per `claude mcp add`):
 ```
 
 Unter **Windows** `"command": "python"` und einen Windows-Pfad verwenden.
+
+---
+
+## Transporte: stdio oder streamable-http
+
+Der Server kann auf zwei Wegen betrieben werden. Die Wahl trifft `--transport` (schlägt alles)
+oder die Umgebungsvariable `VISION_MCP_TRANSPORT`; ohne Angabe bleibt es bei `stdio`.
+
+| Transport | Betrieb | Wann |
+|---|---|---|
+| `stdio` (Default) | Der Agent startet **je Sitzung einen eigenen** Serverprozess. | Einzelplatz, Windows, Debugging |
+| `streamable-http` | **Ein geteilter** Prozess bedient alle Sitzungen unter `http://127.0.0.1:8902/mcp`. | Viele parallele Claude-Code-Sitzungen auf einem Rechner |
+
+```bash
+# geteilter Dienst
+python3 server.py --transport streamable-http --host 127.0.0.1 --port 8902
+```
+
+| Variable / Argument | Bedeutung | Default |
+|---|---|---|
+| `--transport` / `VISION_MCP_TRANSPORT` | `stdio` oder `streamable-http` | `stdio` |
+| `--host` / `VISION_MCP_HOST` | Bind-Adresse. **Nur `127.0.0.1`** — der Server hat keine Auth, `0.0.0.0` würde ihn im LAN öffnen. | `127.0.0.1` |
+| `--port` / `VISION_MCP_PORT` | Port im HTTP-Betrieb | `8902` |
+| `VISION_MCP_PRELOAD` | `1` = YOLO- und OCR-Modelle beim Start laden (erster Aufruf schnell, Ruhezustand ~1 GB), `0` = verzögert beim ersten Aufruf (Ruhezustand ~84 MB) | `1` |
+
+### Pfad-Regel im geteilten Betrieb
+
+Bei `stdio` erbt der Server das **Arbeitsverzeichnis der Sitzung**, relative Bildpfade
+funktionieren also. Der geteilte HTTP-Prozess hat ein **einziges festes** Arbeitsverzeichnis und
+kennt das der aufrufenden Sitzung nicht. Deshalb **lehnt er relative Pfade ausdrücklich ab** —
+mit einer Meldung, die auf absolute Pfade hinweist. Ohne diese Sperre würde ein relativer Pfad
+still gegen das falsche Verzeichnis aufgelöst. Absolute Pfade, `~`-Pfade und `http(s)`-URLs
+funktionieren in beiden Betriebsarten unverändert.
+
+### Thread-Sicherheit
+
+Im geteilten Betrieb können mehrere Sitzungen gleichzeitig Aufrufe schicken. Das verzögerte Laden
+**und** die Inferenz von YOLO und EasyOCR sind darum je durch eine Sperre serialisiert
+(`_yolo_lock`, `_ocr_lock`) — beide Bibliotheken sind nicht als thread-sicher dokumentiert.
+Fachlichen Zustand teilen die Sitzungen nicht: jeder Tool-Aufruf lädt sein Bild selbst und gibt
+seinen Bericht zurück, die Modelle sind reine Lese-Caches.
+
+### Als Dienst unter macOS
+
+`~/Library/LaunchAgents/de.herbe.mcp.vision.plist` (`RunAtLoad`, `KeepAlive`, Logs unter
+`~/Library/Logs/mcp-vision.{out,err}.log`).
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/de.herbe.mcp.vision.plist   # starten
+launchctl kickstart -k gui/$(id -u)/de.herbe.mcp.vision                            # neu starten
+launchctl bootout   gui/$(id -u)/de.herbe.mcp.vision                               # stoppen
+```
+
+Der MCP-Eintrag lautet dann:
+
+```json
+{
+  "mcpServers": {
+    "vision_mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:8902/mcp"
+    }
+  }
+}
+```
+
+### Speicherverhalten
+
+EasyOCR/PyTorch allokieren bei der Erkennung großzügig und geben nur träge zurück. Gemessen auf
+einem M4 Pro mit `VISION_MCP_PRELOAD=0`: **84 MB** im Ruhezustand, **0,7–1,8 GB** nach Analysen
+(1440×931 bis 3456×2234 px). In einem Testlauf **mit** Preload stieg der Prozess nach mehreren
+Retina-Vollbild-Analysen kurzzeitig auf ~9 GB. Wer den Dienst über Wochen laufen lässt, sollte ihn
+gelegentlich per `launchctl kickstart -k` erneuern.
 
 ---
 

@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 from typing import Optional, List, Dict, Any, Tuple
 from functools import partial
 from pathlib import Path
@@ -73,7 +74,34 @@ from PIL import Image
 from pydantic import BaseModel, Field, ConfigDict
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("vision_mcp")
+# ---------------------------------------------------------------------------
+# Transport-Wahl: stdio (eine Instanz pro Sitzung) oder streamable-http
+# (ein geteilter Prozess für alle Sitzungen)
+# ---------------------------------------------------------------------------
+# Reihenfolge: Kommandozeilen-Argument --transport schlägt die Umgebungsvariable
+# VISION_MCP_TRANSPORT, diese schlägt den Default "stdio". Damit bleibt ein
+# Rückfall auf stdio jederzeit ohne Code-Änderung möglich.
+
+
+def _arg_value(flag: str) -> Optional[str]:
+    """Liest --flag wert oder --flag=wert aus sys.argv."""
+    prefix = flag + "="
+    for i, arg in enumerate(sys.argv[1:], start=1):
+        if arg == flag and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+    return None
+
+
+TRANSPORT = (_arg_value("--transport") or os.environ.get("VISION_MCP_TRANSPORT") or "stdio").strip()
+HTTP_HOST = _arg_value("--host") or os.environ.get("VISION_MCP_HOST") or "127.0.0.1"
+HTTP_PORT = int(_arg_value("--port") or os.environ.get("VISION_MCP_PORT") or "8902")
+
+# Nur im geteilten HTTP-Betrieb ist das Arbeitsverzeichnis nicht das der Sitzung.
+SHARED_MODE = TRANSPORT != "stdio"
+
+mcp = FastMCP("vision_mcp", host=HTTP_HOST, port=HTTP_PORT)
 
 # Deutsche Anführungszeichen als Konstanten (f-string nested quote issues)
 LQ = "\u201e"  # „
@@ -120,20 +148,31 @@ def _resolve_yolo_weights() -> str:
     return str(cache_dir / YOLO_MODEL_NAME)
 
 
+# Die Modell-Objekte von ultralytics und EasyOCR sind nicht als thread-sicher
+# dokumentiert. Bei stdio war das gleichgültig (ein Prozess je Sitzung, ein Aufruf
+# zur Zeit); als geteilter HTTP-Server können mehrere Sitzungen gleichzeitig
+# hereinkommen. Die Sperren schützen das verzögerte Laden und die Inferenz, damit
+# sich parallele Sitzungen nicht ins Modell greifen.
+_yolo_lock = threading.Lock()
+_ocr_lock = threading.Lock()
+
+
 def _get_yolo_model():
     global _yolo_model
-    if _yolo_model is None:
-        from ultralytics import YOLO
-        _yolo_model = YOLO(_resolve_yolo_weights())
-    return _yolo_model
+    with _yolo_lock:
+        if _yolo_model is None:
+            from ultralytics import YOLO
+            _yolo_model = YOLO(_resolve_yolo_weights())
+        return _yolo_model
 
 
 def _get_ocr_reader():
     global _ocr_reader
-    if _ocr_reader is None:
-        import easyocr
-        _ocr_reader = easyocr.Reader(OCR_LANGUAGES, gpu=False)
-    return _ocr_reader
+    with _ocr_lock:
+        if _ocr_reader is None:
+            import easyocr
+            _ocr_reader = easyocr.Reader(OCR_LANGUAGES, gpu=False)
+        return _ocr_reader
 
 
 def _preimport_heavy_modules() -> None:
@@ -168,7 +207,20 @@ async def _load_image(source: str) -> Image.Image:
             img = Image.open(tmp.name).convert("RGB")
             os.unlink(tmp.name)
             return img
-    path = Path(source).expanduser().resolve()
+    raw = Path(source).expanduser()
+    # Im geteilten HTTP-Betrieb hat der Server ein eigenes, festes Arbeitsverzeichnis
+    # und kennt das der aufrufenden Sitzung nicht. Ein relativer Pfad würde still
+    # gegen das falsche Verzeichnis aufgelöst — deshalb hier ausdrücklich ablehnen,
+    # statt eine irreführende „Bild nicht gefunden"-Meldung zu erzeugen.
+    if SHARED_MODE and not raw.is_absolute():
+        raise ValueError(
+            f"Relativer Pfad {LQ}{source}{RQ} ist nicht erlaubt: Dieser vision_mcp-Server "
+            f"läuft als geteilter HTTP-Prozess und kennt das Arbeitsverzeichnis deiner "
+            f"Sitzung nicht (sein eigenes ist {os.getcwd()}). "
+            f"Bitte einen absoluten Pfad angeben (z. B. /Users/name/bild.png), einen "
+            f"~-Pfad oder eine http(s)-URL."
+        )
+    path = raw.resolve()
     if not path.exists():
         raise FileNotFoundError(f"Bild nicht gefunden: {path}")
     return Image.open(str(path)).convert("RGB")
@@ -269,7 +321,8 @@ def _pair_sort_key(a: Dict[str, int], b: Dict[str, int]) -> float:
 
 def _detect_objects_sync(img: Image.Image, confidence: float, classes: Optional[List[str]]) -> List[Dict[str, Any]]:
     model = _get_yolo_model()
-    results = model(np.array(img), conf=confidence, verbose=False)
+    with _yolo_lock:
+        results = model(np.array(img), conf=confidence, verbose=False)
     detections = []
     for r in results:
         for box in r.boxes:
@@ -291,7 +344,8 @@ def _detect_objects_sync(img: Image.Image, confidence: float, classes: Optional[
 
 def _detect_text_sync(img: Image.Image) -> List[Dict[str, Any]]:
     reader = _get_ocr_reader()
-    results = reader.readtext(np.array(img))
+    with _ocr_lock:
+        results = reader.readtext(np.array(img))
     detections = []
     for (coords, text, conf) in results:
         xs = [p[0] for p in coords]
@@ -732,5 +786,33 @@ def _selftest() -> int:
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
+
+    if TRANSPORT not in ("stdio", "streamable-http"):
+        print(
+            f"FEHLER: Unbekannter Transport {LQ}{TRANSPORT}{RQ}. "
+            f"Erlaubt: stdio, streamable-http.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Windows-Fix: schwere Importe im Main-Thread, gilt für beide Transporte.
     _preimport_heavy_modules()
-    mcp.run()
+
+    if TRANSPORT == "stdio":
+        mcp.run()
+    elif TRANSPORT == "streamable-http":
+        # Host/Port stecken in den FastMCP-Einstellungen (siehe Konstruktor oben);
+        # mcp.run() nimmt in mcp 1.26 keine host/port-Argumente.
+        print(
+            f"vision_mcp: streamable-http auf http://{HTTP_HOST}:{HTTP_PORT}/mcp "
+            f"(Arbeitsverzeichnis: {os.getcwd()})",
+            file=sys.stderr,
+            flush=True,
+        )
+        # Modelle beim Start laden, damit nicht der erste Tool-Aufruf einer Sitzung
+        # die Ladezeit trägt — im geteilten Prozess passiert das genau einmal.
+        if os.environ.get("VISION_MCP_PRELOAD", "1") != "0":
+            _get_yolo_model()
+            _get_ocr_reader()
+            print("vision_mcp: Modelle vorgeladen.", file=sys.stderr, flush=True)
+        mcp.run(transport="streamable-http")
